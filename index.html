@@ -1,0 +1,24 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>FuelGuard AI - Smart Fuel & LPG Crisis Management Platform</title>
+    <meta name="description" content="AI-powered smart fuel allocation, emergency quotas, distributor management, and cylinder tracking portal to prevent resource crises." />
+    <script>
+      (function() {
+        const theme = localStorage.getItem('fuelguard_theme') || 'dark';
+        if (theme === 'dark') {
+          document.documentElement.classList.add('dark');
+        } else {
+          document.documentElement.classList.remove('dark');
+        }
+      })();
+    </script>
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="/src/main.jsx"></script>
+  </body>
+</html>

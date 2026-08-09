@@ -1,0 +1,89 @@
+import jwt from 'jsonwebtoken';
+import User from '../models/User.js';
+
+const generateToken = (user) => {
+  return jwt.sign(
+    { id: user._id, email: user.email, role: user.role },
+    process.env.JWT_SECRET || 'jwtsecret123',
+    { expiresIn: '30d' }
+  );
+};
+
+export const register = async (req, res, next) => {
+  try {
+    const { email, password, role, fullName } = req.body;
+
+    const userExists = await User.findOne({ email });
+    if (userExists) {
+      return res.status(400).json({ success: false, message: 'User already exists' });
+    }
+
+    const user = await User.create({
+      email,
+      passwordHash: password, // userSchema pre-save hook will encrypt this
+      role,
+      fullName
+    });
+
+    const token = generateToken(user);
+
+    res.status(201).json({
+      success: true,
+      token,
+      user: {
+        id: user._id,
+        email: user.email,
+        role: user.role,
+        fullName: user.fullName
+      }
+    });
+  } catch (err) {
+    next(err);
+  }
+};
+
+export const login = async (req, res, next) => {
+  try {
+    const { email, password } = req.body;
+
+    // Gov admin static login check bypass to match frontend
+    if (email === 'admin@fuelguard.gov' && password === 'admin123') {
+      const adminUser = await User.findOneAndUpdate(
+        { email },
+        { email, passwordHash: 'admin123', role: 'admin', fullName: 'Gov Administrator' },
+        { new: true, upsert: true }
+      );
+      const token = generateToken(adminUser);
+      return res.status(200).json({
+        success: true,
+        token,
+        user: { id: adminUser._id, email, fullName: 'Gov Administrator', role: 'admin' }
+      });
+    }
+
+    const user = await User.findOne({ email }).select('+passwordHash');
+    if (!user) {
+      return res.status(401).json({ success: false, message: 'Invalid credentials' });
+    }
+
+    const isMatch = await user.matchPassword(password);
+    if (!isMatch) {
+      return res.status(401).json({ success: false, message: 'Invalid credentials' });
+    }
+
+    const token = generateToken(user);
+
+    res.status(200).json({
+      success: true,
+      token,
+      user: {
+        id: user._id,
+        email: user.email,
+        role: user.role,
+        fullName: user.fullName
+      }
+    });
+  } catch (err) {
+    next(err);
+  }
+};
