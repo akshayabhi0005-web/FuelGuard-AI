@@ -22,10 +22,32 @@ const app = express();
 app.use(helmet());
 
 // Dynamic CORS configuration via environment variable
-const allowedOrigin = process.env.CORS_ORIGIN || 'http://localhost:5173';
+const getCorsOrigins = () => {
+  const origins = [
+    'https://fuelguard-ai-1.onrender.com',
+    'http://localhost:5173',
+    'http://127.0.0.1:5173'
+  ];
+  const envOrigin = process.env.CORS_ORIGIN;
+  if (envOrigin) {
+    // envOrigin could be a comma-separated list of origins
+    const envOrigins = envOrigin.split(',').map(o => o.trim());
+    for (const origin of envOrigins) {
+      if (origin.startsWith('http') && !origins.includes(origin)) {
+        origins.push(origin);
+      }
+    }
+  }
+  return origins;
+};
+
+export const corsOrigins = getCorsOrigins();
+
 app.use(cors({
-  origin: allowedOrigin,
-  credentials: true
+  origin: corsOrigins,
+  credentials: true,
+  methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
+  allowedHeaders: ['Content-Type', 'Authorization']
 }));
 
 // API Rate Limiters

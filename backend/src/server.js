@@ -1,17 +1,15 @@
 import http from 'http';
 import { Server } from 'socket.io';
-import app from './app.js';
+import app, { corsOrigins } from './app.js';
 import { connectDB } from './config/db.js';
 
 const PORT = process.env.PORT || 5000;
 
-const allowedOrigin = process.env.CORS_ORIGIN || 'http://localhost:5173';
-
 const server = http.createServer(app);
 const io = new Server(server, {
   cors: {
-    origin: [allowedOrigin, 'http://localhost:5173', 'http://127.0.0.1:5173'],
-    methods: ['GET', 'POST', 'PUT', 'DELETE'],
+    origin: corsOrigins,
+    methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
     credentials: true
   }
 });
