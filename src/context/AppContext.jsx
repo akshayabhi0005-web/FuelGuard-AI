@@ -65,7 +65,7 @@ export const AppProvider = ({ children }) => {
   };
 
   const getAuthHeaders = () => {
-    const token = localStorage.getItem('auth_token') || '';
+    const token = authToken || localStorage.getItem('auth_token') || '';
     return {
       'Content-Type': 'application/json',
       'Authorization': `Bearer ${token}`
@@ -78,6 +78,7 @@ export const AppProvider = ({ children }) => {
   const [adminUser, setAdminUser] = useState(() => getLocalStorage('admin_user_session', null));
   const [pumpUser, setPumpUser] = useState(() => getLocalStorage('pump_user_session', null));
   const [distributorUser, setDistributorUser] = useState(() => getLocalStorage('distributor_user_session', null));
+  const [authToken, setAuthToken] = useState(() => localStorage.getItem('auth_token') || '');
 
   // Operator user databases derived from local storage mock supabase users
   const [fuelUsers, setFuelUsers] = useState([]);
@@ -337,7 +338,7 @@ export const AppProvider = ({ children }) => {
   // Synchronize state with Express backend
   useEffect(() => {
     const syncBackendData = async () => {
-      const token = localStorage.getItem('auth_token');
+      const token = authToken || localStorage.getItem('auth_token');
       if (!BACKEND_URL || !token || token === 'undefined' || token === 'null') {
         console.log('Skipping backend sync: No valid authorization token or backend URL is unconfigured.');
         return;
@@ -517,11 +518,18 @@ export const AppProvider = ({ children }) => {
       }
     };
     syncBackendData();
-  }, [fuelUser, lpgUser, adminUser, pumpUser, distributorUser]);
+  }, [fuelUser, lpgUser, adminUser, pumpUser, distributorUser, authToken]);
 
   // Update backend settings if weights/modes change
   useEffect(() => {
     const updateBackendSettings = async () => {
+      const token = authToken || localStorage.getItem('auth_token');
+      if (!BACKEND_URL || !token || token === 'undefined' || token === 'null') {
+        return;
+      }
+      if (!adminUser) {
+        return;
+      }
       try {
         await fetch(BACKEND_URL + '/api/admin/settings', {
           method: 'PUT',
@@ -541,7 +549,7 @@ export const AppProvider = ({ children }) => {
       }
     };
     updateBackendSettings();
-  }, [emergencyMode, normalQuotaLimit, emergencyQuotaLimit, emergencyVehicleQuotaLimit, weightEmergency, weightDemand, weightStock]);
+  }, [emergencyMode, normalQuotaLimit, emergencyQuotaLimit, emergencyVehicleQuotaLimit, weightEmergency, weightDemand, weightStock, authToken, adminUser]);
 
   // Synchronize state changes across multiple browser tabs automatically
   useEffect(() => {
@@ -977,6 +985,7 @@ export const AppProvider = ({ children }) => {
         const userId = uData.user.id;
         const token = uData.token;
         localStorage.setItem('auth_token', token);
+        setAuthToken(token);
 
         // Register vehicle matching user ID
         const vehRes = await fetch(BACKEND_URL + '/api/vehicles', {
@@ -1052,6 +1061,7 @@ export const AppProvider = ({ children }) => {
           const data = await res.json();
           if (data.token) {
             localStorage.setItem('auth_token', data.token);
+            setAuthToken(data.token);
           }
         }
       } catch (err) {
@@ -1074,6 +1084,7 @@ export const AppProvider = ({ children }) => {
           const data = await res.json();
           if (data.token) {
             localStorage.setItem('auth_token', data.token);
+            setAuthToken(data.token);
           }
         }
       } catch (err) {
@@ -1093,6 +1104,7 @@ export const AppProvider = ({ children }) => {
       if (loginRes.ok) {
         const uData = await loginRes.json();
         localStorage.setItem('auth_token', uData.token);
+        setAuthToken(uData.token);
         // Fetch vehicle profile from DB if registered
         let vehicleNumber = 'WP-CAD-8930';
         let vehicleType = 'Car';
@@ -1133,6 +1145,11 @@ export const AppProvider = ({ children }) => {
       const { data, error } = await supabase.auth.signInWithPassword({ email, password });
       if (error) return { success: false, message: error.message };
       
+      if (data.session) {
+        localStorage.setItem('auth_token', data.session.access_token);
+        setAuthToken(data.session.access_token);
+      }
+      
       const userMetadata = data.user.user_metadata || {};
       const loggedUser = {
         email: data.user.email,
@@ -1157,6 +1174,7 @@ export const AppProvider = ({ children }) => {
     setFuelUser(null);
     setAdminUser(null);
     setPumpUser(null);
+    setAuthToken('');
     localStorage.removeItem('auth_token');
   };
 
@@ -1429,6 +1447,7 @@ export const AppProvider = ({ children }) => {
         const userId = uData.user.id;
         const token = uData.token;
         localStorage.setItem('auth_token', token);
+        setAuthToken(token);
 
         // Create Quota wallet for the registered user
         await fetch(BACKEND_URL + '/api/quotas', {
@@ -1487,6 +1506,7 @@ export const AppProvider = ({ children }) => {
           const data = await res.json();
           if (data.token) {
             localStorage.setItem('auth_token', data.token);
+            setAuthToken(data.token);
           }
         }
       } catch (err) {
@@ -1509,6 +1529,7 @@ export const AppProvider = ({ children }) => {
           const data = await res.json();
           if (data.token) {
             localStorage.setItem('auth_token', data.token);
+            setAuthToken(data.token);
           }
         }
       } catch (err) {
@@ -1528,6 +1549,7 @@ export const AppProvider = ({ children }) => {
       if (loginRes.ok) {
         const uData = await loginRes.json();
         localStorage.setItem('auth_token', uData.token);
+        setAuthToken(uData.token);
         const loggedUser = {
           email: uData.user.email,
           fullName: uData.user.fullName,
@@ -1549,6 +1571,11 @@ export const AppProvider = ({ children }) => {
     try {
       const { data, error } = await supabase.auth.signInWithPassword({ email, password });
       if (error) return { success: false, message: error.message };
+      
+      if (data.session) {
+        localStorage.setItem('auth_token', data.session.access_token);
+        setAuthToken(data.session.access_token);
+      }
       
       const userMetadata = data.user.user_metadata || {};
       const loggedUser = {
@@ -1573,7 +1600,9 @@ export const AppProvider = ({ children }) => {
   const logoutLpgUser = async () => {
     await supabase.auth.signOut();
     setLpgUser(null);
+    setAdminUser(null);
     setDistributorUser(null);
+    setAuthToken('');
     localStorage.removeItem('auth_token');
   };
 
