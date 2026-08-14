@@ -2,7 +2,55 @@ import React, { createContext, useState, useEffect } from 'react';
 import io from 'socket.io-client';
 import supabase from '../utils/supabaseClient';
 
-const BACKEND_URL = import.meta.env.VITE_API_URL || BACKEND_URL + '';
+const getSafeBackendUrl = () => {
+  const url = import.meta.env.VITE_BACKEND_URL || import.meta.env.VITE_API_URL || (import.meta.env.DEV ? 'http://localhost:5000' : '');
+  if (!url || url === 'undefined' || url === 'null') {
+    return '';
+  }
+  return url.replace(/\/$/, '');
+};
+const BACKEND_URL = getSafeBackendUrl();
+
+const originalFetch = window.fetch;
+const fetch = async (input, init) => {
+  const url = typeof input === 'string' ? input : input.url;
+  
+  const isRelativeApi = url.startsWith('/api') || url.startsWith('api/');
+  const isUndefinedApi = url.includes('undefined/api') || url.startsWith('undefined/api');
+  const isNullApi = url.includes('null/api') || url.startsWith('null/api');
+
+  if (!BACKEND_URL && (isRelativeApi || isUndefinedApi || isNullApi)) {
+    throw new Error('Backend URL is not configured. Running in offline fallback mode.');
+  }
+
+  // Prepend BACKEND_URL for relative /api paths to make sure we don't hit frontend Render origin
+  if (BACKEND_URL && isRelativeApi) {
+    const cleanPath = url.startsWith('/') ? url : '/' + url;
+    if (typeof input === 'string') {
+      input = BACKEND_URL + cleanPath;
+    } else {
+      input = new Request(BACKEND_URL + cleanPath, input);
+    }
+  }
+
+  const response = await originalFetch(input, init);
+  
+  if (response.json) {
+    const originalJson = response.json;
+    response.json = async function() {
+      const contentType = response.headers.get('content-type');
+      if (!contentType || !contentType.includes('application/json')) {
+        const text = await response.text();
+        console.warn('Expected JSON response but received non-JSON payload:', text.substring(0, 100));
+        throw new Error('Received non-JSON response from server (possible HTML redirect or offline fallback).');
+      }
+      return originalJson.apply(this, arguments);
+    };
+  }
+  
+  return response;
+};
+
 
 export const AppContext = createContext();
 
@@ -290,7 +338,7 @@ export const AppProvider = ({ children }) => {
   useEffect(() => {
     const syncBackendData = async () => {
       try {
-        console.log('Synchronizing data with backend at ${BACKEND_URL}...');
+        console.log(`Synchronizing data with backend at ${BACKEND_URL}...`);
 
         // 1. Sync Emergency Settings config
         const settingsRes = await fetch(BACKEND_URL + '/api/admin/settings', { headers: getAuthHeaders() });
@@ -521,8 +569,12 @@ export const AppProvider = ({ children }) => {
 
   // Socket.IO real-time synchronization
   useEffect(() => {
-    console.log('Connecting to Socket.IO backend at ${BACKEND_URL}...');
-    const socket = io(BACKEND_URL + '', {
+    if (!BACKEND_URL) {
+      console.warn('Socket.IO connection skipped: BACKEND_URL is not defined.');
+      return;
+    }
+    console.log(`Connecting to Socket.IO backend at ${BACKEND_URL}...`);
+    const socket = io(BACKEND_URL, {
       transports: ['websocket'],
       reconnectionAttempts: 5
     });
@@ -2006,7 +2058,8 @@ export const AppProvider = ({ children }) => {
       verifyBackendLedger,
       tamperBackendLedger,
       getSimulatedSMSLogs,
-      getResearchEvaluationMetrics
+      getResearchEvaluationMetrics,
+      BACKEND_URL
     }}>
       {children}
     </AppContext.Provider>
