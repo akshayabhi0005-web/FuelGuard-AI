@@ -337,6 +337,11 @@ export const AppProvider = ({ children }) => {
   // Synchronize state with Express backend
   useEffect(() => {
     const syncBackendData = async () => {
+      const token = localStorage.getItem('auth_token');
+      if (!BACKEND_URL || !token || token === 'undefined' || token === 'null') {
+        console.log('Skipping backend sync: No valid authorization token or backend URL is unconfigured.');
+        return;
+      }
       try {
         console.log(`Synchronizing data with backend at ${BACKEND_URL}...`);
 
@@ -438,67 +443,72 @@ export const AppProvider = ({ children }) => {
         }
 
         // 5. Sync LPG Bookings
-        const bookingsRes = await fetch(BACKEND_URL + '/api/lpg/booking', { headers: getAuthHeaders() });
-        if (bookingsRes.ok) {
-          const bkData = await bookingsRes.json();
-          if (bkData.bookings.length > 0) {
-            const mappedBookings = bkData.bookings.map(bk => ({
-              id: bk.otpCode ? `BK-${bk.otpCode.substring(0, 5)}` : `BK-${bk._id.substring(0, 5)}`,
-              date: new Date(bk.createdAt).toISOString().split('T')[0],
-              createdAt: bk.createdAt,
-              verifiedAt: bk.createdAt,
-              allocatedAt: bk.createdAt,
-              completedAt: bk.deliveredAt || '',
-              status: bk.status,
-              weight: bk.weight,
-              cost: bk.cost,
-              trackingStep: bk.status === 'Delivered' ? 4 : (bk.status === 'In Transit' ? 3 : (bk.status === 'Confirmed' ? 2 : 1)),
-              userId: bk.userId?.email || 'citizen@lpg.com',
-              location: bk.distributorName,
-              otpCode: bk.otpCode,
-              priorityScore: 5.0,
-              verificationStatus: 'VALID',
-              transactionStatus: bk.status === 'Delivered' ? 'Completed' : 'Approved',
-              fraudCheckStatus: 'Passed',
-              emergencyStatus: 'NORMAL',
-              _id: bk._id
-            }));
-            setLpgBookings(mappedBookings);
-            if (mappedBookings.length > 0) {
-              setLpgStatus(mappedBookings[0].status);
+        const activeUser = adminUser || pumpUser || distributorUser || fuelUser || lpgUser;
+        if (activeUser && (activeUser.role === 'admin' || activeUser.role === 'distributor')) {
+          const bookingsRes = await fetch(BACKEND_URL + '/api/lpg/booking', { headers: getAuthHeaders() });
+          if (bookingsRes.ok) {
+            const bkData = await bookingsRes.json();
+            if (bkData.bookings.length > 0) {
+              const mappedBookings = bkData.bookings.map(bk => ({
+                id: bk.otpCode ? `BK-${bk.otpCode.substring(0, 5)}` : `BK-${bk._id.substring(0, 5)}`,
+                date: new Date(bk.createdAt).toISOString().split('T')[0],
+                createdAt: bk.createdAt,
+                verifiedAt: bk.createdAt,
+                allocatedAt: bk.createdAt,
+                completedAt: bk.deliveredAt || '',
+                status: bk.status,
+                weight: bk.weight,
+                cost: bk.cost,
+                trackingStep: bk.status === 'Delivered' ? 4 : (bk.status === 'In Transit' ? 3 : (bk.status === 'Confirmed' ? 2 : 1)),
+                userId: bk.userId?.email || 'citizen@lpg.com',
+                location: bk.distributorName,
+                otpCode: bk.otpCode,
+                priorityScore: 5.0,
+                verificationStatus: 'VALID',
+                transactionStatus: bk.status === 'Delivered' ? 'Completed' : 'Approved',
+                fraudCheckStatus: 'Passed',
+                emergencyStatus: 'NORMAL',
+                _id: bk._id
+              }));
+              setLpgBookings(mappedBookings);
+              if (mappedBookings.length > 0) {
+                setLpgStatus(mappedBookings[0].status);
+              }
             }
           }
         }
 
         // 6. Sync Fraud Logs
-        const fraudRes = await fetch(BACKEND_URL + '/api/admin/fraud', { headers: getAuthHeaders() });
-        if (fraudRes.ok) {
-          const fData = await fraudRes.json();
-          if (fData.logs.length === 0) {
-            for (const f of fraudLogs) {
-              await fetch(BACKEND_URL + '/api/admin/fraud', {
-                method: 'POST',
-                headers: getAuthHeaders(),
-                body: JSON.stringify({
-                  type: f.type,
-                  location: f.location,
-                  details: f.details,
-                  riskScore: f.riskScore
-                })
-              });
+        if (activeUser && activeUser.role === 'admin') {
+          const fraudRes = await fetch(BACKEND_URL + '/api/admin/fraud', { headers: getAuthHeaders() });
+          if (fraudRes.ok) {
+            const fData = await fraudRes.json();
+            if (fData.logs.length === 0) {
+              for (const f of fraudLogs) {
+                await fetch(BACKEND_URL + '/api/admin/fraud', {
+                  method: 'POST',
+                  headers: getAuthHeaders(),
+                  body: JSON.stringify({
+                    type: f.type,
+                    location: f.location,
+                    details: f.details,
+                    riskScore: f.riskScore
+                  })
+                });
+              }
+            } else {
+              const mappedLogs = fData.logs.map((l, idx) => ({
+                id: l._id,
+                type: l.type,
+                date: l.date,
+                location: l.location,
+                details: l.details,
+                riskScore: l.riskScore,
+                status: l.status,
+                time: new Date(l.createdAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
+              }));
+              setFraudLogs(mappedLogs);
             }
-          } else {
-            const mappedLogs = fData.logs.map((l, idx) => ({
-              id: l._id,
-              type: l.type,
-              date: l.date,
-              location: l.location,
-              details: l.details,
-              riskScore: l.riskScore,
-              status: l.status,
-              time: new Date(l.createdAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
-            }));
-            setFraudLogs(mappedLogs);
           }
         }
 
@@ -507,7 +517,7 @@ export const AppProvider = ({ children }) => {
       }
     };
     syncBackendData();
-  }, []);
+  }, [fuelUser, lpgUser, adminUser, pumpUser, distributorUser]);
 
   // Update backend settings if weights/modes change
   useEffect(() => {
@@ -1032,28 +1042,44 @@ export const AppProvider = ({ children }) => {
     // 1. Check for Government Admin
     if (email === 'admin@fuelguard.gov' && password === 'admin123') {
       const admin = { email, fullName: 'Gov Administrator', role: 'admin' };
+      try {
+        const res = await fetch(BACKEND_URL + '/api/auth/login', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ email, password })
+        });
+        if (res.ok) {
+          const data = await res.json();
+          if (data.token) {
+            localStorage.setItem('auth_token', data.token);
+          }
+        }
+      } catch (err) {
+        console.warn('Backend login failed, using local session state only', err.message);
+      }
       setAdminUser(admin);
-      fetch(BACKEND_URL + '/api/auth/login', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ email, password })
-      }).then(res => res.json()).then(data => {
-        if (data.token) localStorage.setItem('auth_token', data.token);
-      }).catch(() => {});
       return { success: true, role: 'admin' };
     }
     
     // 2. Check for Petrol Pump Operator
     if (email === 'pump@ceypetco.com' && password === 'pump123') {
       const operator = { email, fullName: 'Ceypetco Pump #4 Manager', station: 'Ceypetco - Town Hall', role: 'pump' };
+      try {
+        const res = await fetch(BACKEND_URL + '/api/auth/login', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ email, password })
+        });
+        if (res.ok) {
+          const data = await res.json();
+          if (data.token) {
+            localStorage.setItem('auth_token', data.token);
+          }
+        }
+      } catch (err) {
+        console.warn('Backend login failed, using local session state only', err.message);
+      }
       setPumpUser(operator);
-      fetch(BACKEND_URL + '/api/auth/login', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ email, password })
-      }).then(res => res.json()).then(data => {
-        if (data.token) localStorage.setItem('auth_token', data.token);
-      }).catch(() => {});
       return { success: true, role: 'pump' };
     }
 
@@ -1451,28 +1477,44 @@ export const AppProvider = ({ children }) => {
     // 1. Check for Government Admin
     if (email === 'admin@fuelguard.gov' && password === 'admin123') {
       const admin = { email, fullName: 'Gov Administrator', role: 'admin' };
+      try {
+        const res = await fetch(BACKEND_URL + '/api/auth/login', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ email, password })
+        });
+        if (res.ok) {
+          const data = await res.json();
+          if (data.token) {
+            localStorage.setItem('auth_token', data.token);
+          }
+        }
+      } catch (err) {
+        console.warn('Backend login failed, using local session state only', err.message);
+      }
       setAdminUser(admin);
-      fetch(BACKEND_URL + '/api/auth/login', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ email, password })
-      }).then(res => res.json()).then(data => {
-        if (data.token) localStorage.setItem('auth_token', data.token);
-      }).catch(() => {});
       return { success: true, role: 'admin' };
     }
     
     // 2. Check for LPG Distributor Operator
     if (email === 'distributor@supergas.com' && password === 'distributor123') {
       const dist = { email, fullName: 'Super Gas Operator #12', company: 'Super Gas Distributors - Colombo', role: 'distributor' };
+      try {
+        const res = await fetch(BACKEND_URL + '/api/auth/login', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ email, password })
+        });
+        if (res.ok) {
+          const data = await res.json();
+          if (data.token) {
+            localStorage.setItem('auth_token', data.token);
+          }
+        }
+      } catch (err) {
+        console.warn('Backend login failed, using local session state only', err.message);
+      }
       setDistributorUser(dist);
-      fetch(BACKEND_URL + '/api/auth/login', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ email, password })
-      }).then(res => res.json()).then(data => {
-        if (data.token) localStorage.setItem('auth_token', data.token);
-      }).catch(() => {});
       return { success: true, role: 'distributor' };
     }
 
