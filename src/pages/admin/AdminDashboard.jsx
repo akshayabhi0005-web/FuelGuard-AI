@@ -9,7 +9,8 @@ import {
 import { 
   Building2, ShieldAlert, AlertTriangle, TrendingUp, BarChart3, 
   Settings, Users, Fuel, Flame, LineChart as ChartIcon, FileText, 
-  CheckCircle, PlusCircle, UserCheck, ShieldCheck, RefreshCw, XCircle
+  CheckCircle, PlusCircle, UserCheck, ShieldCheck, RefreshCw, XCircle,
+  Database, Award
 } from 'lucide-react';
 
 const AdminDashboard = () => {
