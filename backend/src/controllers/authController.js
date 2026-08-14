@@ -1,5 +1,7 @@
 import jwt from 'jsonwebtoken';
+import bcrypt from 'bcryptjs';
 import User from '../models/User.js';
+import { isDbConnected, memFindUserByEmail, memCreateUser } from '../services/memoryDb.js';
 
 const generateToken = (user) => {
   return jwt.sign(
@@ -12,6 +14,27 @@ const generateToken = (user) => {
 export const register = async (req, res, next) => {
   try {
     const { email, password, role, fullName } = req.body;
+
+    if (!isDbConnected) {
+      const userExists = memFindUserByEmail(email);
+      if (userExists) {
+        return res.status(400).json({ success: false, message: 'User already exists' });
+      }
+
+      const user = await memCreateUser({ email, passwordHash: password, role, fullName });
+      const token = generateToken(user);
+
+      return res.status(201).json({
+        success: true,
+        token,
+        user: {
+          id: user._id,
+          email: user.email,
+          role: user.role,
+          fullName: user.fullName
+        }
+      });
+    }
 
     const userExists = await User.findOne({ email });
     if (userExists) {
@@ -48,16 +71,45 @@ export const login = async (req, res, next) => {
 
     // Gov admin static login check bypass to match frontend
     if (email === 'admin@fuelguard.gov' && password === 'admin123') {
-      const adminUser = await User.findOneAndUpdate(
-        { email },
-        { email, passwordHash: 'admin123', role: 'admin', fullName: 'Gov Administrator' },
-        { new: true, upsert: true }
-      );
+      let adminUser;
+      if (isDbConnected) {
+        adminUser = await User.findOneAndUpdate(
+          { email },
+          { email, passwordHash: 'admin123', role: 'admin', fullName: 'Gov Administrator' },
+          { new: true, upsert: true }
+        );
+      } else {
+        adminUser = memFindUserByEmail(email);
+      }
       const token = generateToken(adminUser);
       return res.status(200).json({
         success: true,
         token,
-        user: { id: adminUser._id, email, fullName: 'Gov Administrator', role: 'admin' }
+        user: { id: adminUser._id, email: adminUser.email, fullName: adminUser.fullName, role: adminUser.role }
+      });
+    }
+
+    if (!isDbConnected) {
+      const user = memFindUserByEmail(email);
+      if (!user) {
+        return res.status(401).json({ success: false, message: 'Invalid credentials' });
+      }
+
+      const isMatch = await bcrypt.compare(password, user.passwordHash);
+      if (!isMatch) {
+        return res.status(401).json({ success: false, message: 'Invalid credentials' });
+      }
+
+      const token = generateToken(user);
+      return res.status(200).json({
+        success: true,
+        token,
+        user: {
+          id: user._id,
+          email: user.email,
+          role: user.role,
+          fullName: user.fullName
+        }
       });
     }
 

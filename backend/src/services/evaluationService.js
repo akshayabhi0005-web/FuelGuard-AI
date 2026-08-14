@@ -1,6 +1,7 @@
 import Transaction from '../models/Transaction.js';
 import Forecast from '../models/Forecast.js';
 import FuelInventory from '../models/FuelInventory.js';
+import { isDbConnected, memoryDb } from './memoryDb.js';
 
 // Calculate Gini Coefficient
 const calculateGini = (values) => {
@@ -31,6 +32,10 @@ export const computeResearchMetrics = async (isTestMode = false, testData = null
     txList = testData.transactions || [];
     forecastList = testData.forecasts || [];
     stationList = testData.stations || [];
+  } else if (!isDbConnected) {
+    txList = memoryDb.transactions || [];
+    forecastList = memoryDb.forecasts || [];
+    stationList = memoryDb.fuelInventory || [];
   } else {
     // Read directly from MongoDB
     txList = await Transaction.find({});

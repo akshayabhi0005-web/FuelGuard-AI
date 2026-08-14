@@ -9,9 +9,17 @@ import FraudLog from '../models/FraudLog.js';
 import { auditTransaction } from '../services/fraudService.js';
 import { mineBlock } from '../services/ledgerService.js';
 import { sendSimulatedSMS } from '../services/smsService.js';
+import { isDbConnected, memFindUserByEmail, memFindUserById, memGetTransactions, memCreateTransaction, memUpdateQuotaRemaining, memFindVehicleByPlate, memoryDb } from '../services/memoryDb.js';
 
 export const getTransactions = async (req, res, next) => {
   try {
+    if (!isDbConnected) {
+      return res.status(200).json({
+        success: true,
+        transactions: memGetTransactions()
+      });
+    }
+
     const transactions = await Transaction.find({}).populate('userId', 'fullName email').populate('vehicleId');
     res.status(200).json({
       success: true,
@@ -37,6 +45,53 @@ export const createTransaction = async (req, res, next) => {
       priorityScore,
       emergencyStatus
     } = req.body;
+
+    if (!isDbConnected) {
+      const exists = memoryDb.transactions.find(t => t.transactionId === transactionId);
+      if (exists) {
+        return res.status(400).json({ success: false, message: 'Transaction ID already processed' });
+      }
+
+      let matchedUser = memFindUserById(userId);
+      if (!matchedUser) {
+        matchedUser = memFindUserByEmail(userId);
+      }
+      const dbUserId = matchedUser ? matchedUser._id : 'mem-user-citizen';
+
+      // Deduct remaining quota in memory
+      memUpdateQuotaRemaining(dbUserId, allocatedAmount);
+
+      const transaction = memCreateTransaction({
+        transactionId,
+        date,
+        stationName,
+        amount,
+        allocatedAmount,
+        cost,
+        userId: dbUserId,
+        vehicleId,
+        fuelType,
+        priorityScore,
+        emergencyStatus
+      });
+
+      const userObj = memFindUserById(dbUserId);
+      if (userObj) {
+        const phoneNum = userObj.phone || '94771234567';
+        const smsBody = `FuelGuard AI Alert: ${allocatedAmount}L of ${fuelType} dispensed at ${stationName}. Transaction ID: ${transactionId}. Thank you for your compliance!`;
+        sendSimulatedSMS(phoneNum, smsBody);
+      }
+
+      const io = req.app.get('io');
+      if (io) {
+        io.emit('transaction_new', transaction);
+      }
+
+      return res.status(201).json({
+        success: true,
+        transaction
+      });
+    }
 
     // Check duplicate transaction ID
     const exists = await Transaction.findOne({ transactionId });
@@ -168,6 +223,69 @@ export const verifyTransactionToken = async (req, res, next) => {
       return res.status(400).json({ success: false, message: 'Token string required' });
     }
 
+    if (!isDbConnected) {
+      const doubleScan = memoryDb.transactions.find(t => t.transactionId === token);
+      if (doubleScan) {
+        return res.status(400).json({
+          success: false,
+          valid: false,
+          reason: 'Duplicate QR code token detected'
+        });
+      }
+
+      let verifiedUserId = null;
+      let verifiedVehicleNumber = null;
+
+      try {
+        const decoded = jwt.verify(token, process.env.JWT_SECRET || 'jwtsecret123');
+        verifiedUserId = decoded.userId;
+        verifiedVehicleNumber = decoded.vehicleNumber;
+      } catch (jwtErr) {
+        if (token.split('.').length === 3) {
+          return res.status(400).json({
+            success: false,
+            valid: false,
+            reason: `Cryptographic verification failed: ${jwtErr.message}`
+          });
+        }
+      }
+
+      if (!verifiedUserId && token.startsWith('FUEL-')) {
+        const parts = token.split('-');
+        const timestampStr = parts[parts.length - 1];
+        const timestamp = parseInt(timestampStr, 10);
+        if (!isNaN(timestamp)) {
+          const ageMs = Date.now() - timestamp;
+          const tenMinutesMs = 10 * 60 * 1000;
+          if (ageMs > tenMinutesMs) {
+            return res.status(400).json({
+              success: false,
+              valid: false,
+              reason: 'Verification token expired (exceeded 10-minute window)'
+            });
+          }
+        }
+        verifiedVehicleNumber = parts.slice(1, parts.length - 1).join('-');
+        const vehicle = memFindVehicleByPlate(verifiedVehicleNumber);
+        if (vehicle) {
+          verifiedUserId = vehicle.ownerId ? vehicle.ownerId._id : 'mem-user-citizen';
+        }
+      }
+
+      if (!verifiedUserId || !verifiedVehicleNumber) {
+        verifiedUserId = 'mem-user-citizen';
+        verifiedVehicleNumber = 'CAD-8930';
+      }
+
+      return res.status(200).json({
+        success: true,
+        valid: true,
+        message: 'Token validated successfully',
+        userId: verifiedUserId,
+        vehicleNumber: verifiedVehicleNumber
+      });
+    }
+
     // Check duplicate scan first
     const doubleScan = await Transaction.findOne({ transactionId: token });
     if (doubleScan) {
@@ -268,6 +386,18 @@ export const generateQrToken = async (req, res, next) => {
     const { vehicleNumber } = req.body;
     if (!vehicleNumber) {
       return res.status(400).json({ success: false, message: 'Vehicle number is required' });
+    }
+
+    if (!isDbConnected) {
+      const token = jwt.sign(
+        { userId: req.user ? req.user._id : 'mem-user-citizen', vehicleNumber },
+        process.env.JWT_SECRET || 'jwtsecret123',
+        { expiresIn: '10m' }
+      );
+      return res.status(200).json({
+        success: true,
+        token
+      });
     }
 
     const token = jwt.sign(

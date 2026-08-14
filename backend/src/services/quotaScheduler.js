@@ -1,8 +1,15 @@
 import cron from 'node-cron';
 import Quota from '../models/Quota.js';
+import { isDbConnected, memResetAllQuotas, memoryDb } from './memoryDb.js';
 
 // Reset all user quotas to their normalLimits
 export const resetAllQuotas = async () => {
+  if (!isDbConnected) {
+    console.log('⏰ Quota Scheduler: Executing in-memory quota reset fallback...');
+    memResetAllQuotas();
+    return { modifiedCount: Object.keys(memoryDb.quotas).length };
+  }
+  
   const result = await Quota.updateMany(
     {},
     [

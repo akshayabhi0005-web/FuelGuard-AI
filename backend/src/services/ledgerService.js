@@ -1,5 +1,6 @@
 import crypto from 'crypto';
 import Transaction from '../models/Transaction.js';
+import { isDbConnected, memoryDb } from './memoryDb.js';
 
 // Calculate SHA-256 block hash for a transaction node
 export const calculateBlockHash = (txId, amount, stationName, userId, previousHash, nonce) => {
@@ -23,7 +24,14 @@ export const mineBlock = (txId, amount, stationName, userId, previousHash) => {
 
 // Validate the entire transaction history chain
 export const verifyLedgerIntegrity = async () => {
-  const txs = await Transaction.find({ transactionStatus: 'Completed' }).sort({ createdAt: 1 });
+  let txs;
+  if (!isDbConnected) {
+    txs = [...memoryDb.transactions]
+      .filter(t => t.transactionStatus === 'Completed')
+      .sort((a, b) => new Date(a.createdAt) - new Date(b.createdAt));
+  } else {
+    txs = await Transaction.find({ transactionStatus: 'Completed' }).sort({ createdAt: 1 });
+  }
   let previousHash = '0';
 
   for (let i = 0; i < txs.length; i++) {

@@ -2,9 +2,17 @@ import mongoose from 'mongoose';
 import LPGInventory from '../models/LPGInventory.js';
 import LPGBooking from '../models/LPGBooking.js';
 import User from '../models/User.js';
+import { isDbConnected, memGetLpgBookings, memCreateLpgBooking, memUpdateLpgBookingStatus, memVerifyLpgBookingOtp, memFindUserById, memFindUserByEmail, memoryDb } from '../services/memoryDb.js';
 
 export const getLpgInventory = async (req, res, next) => {
   try {
+    if (!isDbConnected) {
+      return res.status(200).json({
+        success: true,
+        inventory: memoryDb.lpgInventory
+      });
+    }
+
     const inventory = await LPGInventory.find({});
     res.status(200).json({
       success: true,
@@ -18,6 +26,23 @@ export const getLpgInventory = async (req, res, next) => {
 export const createLpgInventoryNode = async (req, res, next) => {
   try {
     const { distributorName, district, stock, reserved, status } = req.body;
+
+    if (!isDbConnected) {
+      const node = {
+        _id: `mem-lpg-${Date.now()}`,
+        distributorName,
+        district,
+        stock,
+        reserved,
+        status
+      };
+      memoryDb.lpgInventory.push(node);
+      return res.status(201).json({
+        success: true,
+        node
+      });
+    }
+
     const node = await LPGInventory.create({
       distributorName,
       district,
@@ -38,6 +63,27 @@ export const updateLpgInventory = async (req, res, next) => {
   try {
     const { id } = req.params;
     const { stock, reserved, status } = req.body;
+
+    if (!isDbConnected) {
+      const node = memoryDb.lpgInventory.find(n => n._id === id);
+      if (!node) {
+        return res.status(404).json({ success: false, message: 'Distributor node not found' });
+      }
+      node.stock = stock;
+      node.reserved = reserved;
+      node.status = status;
+
+      const io = req.app.get('io');
+      if (io) {
+        io.emit('lpg_inventory_update', node);
+      }
+
+      return res.status(200).json({
+        success: true,
+        node
+      });
+    }
+
     const node = await LPGInventory.findByIdAndUpdate(
       id,
       { stock, reserved, status },
@@ -64,6 +110,49 @@ export const updateLpgInventory = async (req, res, next) => {
 export const createLpgBooking = async (req, res, next) => {
   try {
     const { userId, distributorName, weight, cost } = req.body;
+
+    if (!isDbConnected) {
+      let matchedUser = memFindUserById(userId);
+      if (!matchedUser) {
+        matchedUser = memFindUserByEmail(userId);
+      }
+      const dbUserId = matchedUser ? matchedUser._id : 'mem-user-citizen';
+
+      // Lock safety check in memory
+      const lastDeliveredBooking = memoryDb.lpgBookings
+        .filter(b => b.userId === dbUserId && b.status === 'Delivered')
+        .sort((a, b) => new Date(b.deliveredAt) - new Date(a.deliveredAt))[0];
+
+      if (lastDeliveredBooking) {
+        const daysSinceLast = (Date.now() - new Date(lastDeliveredBooking.deliveredAt).getTime()) / (1000 * 60 * 60 * 24);
+        if (daysSinceLast < 21) {
+          const remainingDays = Math.ceil(21 - daysSinceLast);
+          return res.status(400).json({
+            success: false,
+            message: `Booking locked. Safety interval requires ${remainingDays} more days before booking again.`
+          });
+        }
+      }
+
+      const otpCode = Math.floor(100000 + Math.random() * 900000).toString();
+      const booking = memCreateLpgBooking({
+        userId: dbUserId,
+        distributorName,
+        weight,
+        cost,
+        otpCode
+      });
+
+      const io = req.app.get('io');
+      if (io) {
+        io.emit('booking_new', booking);
+      }
+
+      return res.status(201).json({
+        success: true,
+        booking
+      });
+    }
 
     let dbUserId = userId;
     if (!mongoose.Types.ObjectId.isValid(userId)) {
@@ -124,6 +213,20 @@ export const createLpgBooking = async (req, res, next) => {
 
 export const getBookings = async (req, res, next) => {
   try {
+    if (!isDbConnected) {
+      const bookings = memoryDb.lpgBookings.map(b => {
+        const user = memFindUserById(b.userId);
+        return {
+          ...b,
+          userId: user ? { _id: user._id, fullName: user.fullName, email: user.email } : null
+        };
+      });
+      return res.status(200).json({
+        success: true,
+        bookings
+      });
+    }
+
     const bookings = await LPGBooking.find({}).populate('userId', 'fullName email');
     res.status(200).json({
       success: true,
@@ -138,6 +241,31 @@ export const updateBookingStatus = async (req, res, next) => {
   try {
     const { id } = req.params;
     const { status, code } = req.body;
+
+    if (!isDbConnected) {
+      const booking = memoryDb.lpgBookings.find(b => b._id === id);
+      if (!booking) {
+        return res.status(404).json({ success: false, message: 'Booking not found' });
+      }
+
+      if (status === 'Delivered') {
+        if (booking.otpCode !== code) {
+          return res.status(400).json({ success: false, message: 'Invalid handoff verification OTP' });
+        }
+        booking.deliveredAt = new Date().toISOString();
+      }
+
+      booking.status = status;
+      const io = req.app.get('io');
+      if (io) {
+        io.emit('booking_update', booking);
+      }
+
+      return res.status(200).json({
+        success: true,
+        booking
+      });
+    }
 
     const booking = await LPGBooking.findById(id);
     if (!booking) {
