@@ -505,6 +505,19 @@ export const generateQrToken = async (req, res, next) => {
 export const verifyQuotaToken = async (req, res, next) => {
   try {
     const { token } = req.body;
+    
+    // Mask token for safe logging (e.g. 98GQ-PNUZ-FD -> 98GQ-XXXX-XX)
+    const maskedToken = token ? `${token.trim().toUpperCase().substring(0, 4)}-XXXX-XX` : 'none';
+    
+    console.log('[DEBUG verify-token] Request reached verify-token');
+    console.log(`[DEBUG verify-token] Operator authenticated: ${!!req.user}`);
+    console.log(`[DEBUG verify-token] Token received (masked): ${maskedToken}`);
+
+    if (!req.user) {
+      console.log('[DEBUG verify-token] Rejected: Missing operator authentication');
+      return res.status(401).json({ success: false, message: 'Not authorized, missing operator authentication' });
+    }
+
     if (!token) {
       return res.status(400).json({ success: false, message: 'Token string required' });
     }
@@ -514,19 +527,26 @@ export const verifyQuotaToken = async (req, res, next) => {
 
     if (!isDbConnected) {
       const memSecToken = memFindSecureTokenByHash(tokenHash);
+      console.log(`[DEBUG verify-token] Token found (memory): ${!!memSecToken}`);
+      
       if (!memSecToken) {
-        return res.status(400).json({ success: false, valid: false, reason: 'Invalid token' });
+        return res.status(400).json({ success: false, valid: false, reason: 'token not found' });
       }
+      
+      const isExpired = new Date() > memSecToken.expiresAt;
+      console.log(`[DEBUG verify-token] Token expired (memory): ${isExpired}`);
+      console.log(`[DEBUG verify-token] Token used (memory): ${memSecToken.used}`);
+
       if (memSecToken.used) {
-        return res.status(400).json({ success: false, valid: false, reason: 'Token already used' });
+        return res.status(400).json({ success: false, valid: false, reason: 'token already used' });
       }
-      if (new Date() > memSecToken.expiresAt) {
-        return res.status(400).json({ success: false, valid: false, reason: 'Token expired' });
+      if (isExpired) {
+        return res.status(400).json({ success: false, valid: false, reason: 'token expired' });
       }
 
       const quota = memGetQuotaByUserId(memSecToken.userId);
       if (!quota || quota.remainingQuota <= 0) {
-        return res.status(400).json({ success: false, valid: false, reason: 'Insufficient quota' });
+        return res.status(400).json({ success: false, valid: false, reason: 'quota unavailable' });
       }
 
       const user = memFindUserById(memSecToken.userId) || { fullName: 'Registered Citizen' };
@@ -547,19 +567,26 @@ export const verifyQuotaToken = async (req, res, next) => {
 
     // MongoDB path
     const secureToken = await SecureToken.findOne({ tokenHash });
+    console.log(`[DEBUG verify-token] Token found (MongoDB): ${!!secureToken}`);
+    
     if (!secureToken) {
-      return res.status(400).json({ success: false, valid: false, reason: 'Invalid token' });
+      return res.status(400).json({ success: false, valid: false, reason: 'token not found' });
     }
+    
+    const isExpired = new Date() > secureToken.expiresAt;
+    console.log(`[DEBUG verify-token] Token expired (MongoDB): ${isExpired}`);
+    console.log(`[DEBUG verify-token] Token used (MongoDB): ${secureToken.used}`);
+
     if (secureToken.used) {
-      return res.status(400).json({ success: false, valid: false, reason: 'Token already used' });
+      return res.status(400).json({ success: false, valid: false, reason: 'token already used' });
     }
-    if (new Date() > secureToken.expiresAt) {
-      return res.status(400).json({ success: false, valid: false, reason: 'Token expired' });
+    if (isExpired) {
+      return res.status(400).json({ success: false, valid: false, reason: 'token expired' });
     }
 
     const quota = await Quota.findOne({ userId: secureToken.userId });
     if (!quota || quota.remainingQuota <= 0) {
-      return res.status(400).json({ success: false, valid: false, reason: 'Insufficient quota' });
+      return res.status(400).json({ success: false, valid: false, reason: 'quota unavailable' });
     }
 
     const user = await User.findById(secureToken.userId);

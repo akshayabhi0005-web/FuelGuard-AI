@@ -89,6 +89,26 @@ export const login = async (req, res, next) => {
       });
     }
 
+    // Petrol pump operator static login check bypass to match frontend
+    if (email === 'pump@ceypetco.com' && password === 'pump123') {
+      let pumpUser;
+      if (isDbConnected) {
+        pumpUser = await User.findOneAndUpdate(
+          { email },
+          { email, passwordHash: 'password123', role: 'pump', fullName: 'Ceypetco Pump Operator' },
+          { new: true, upsert: true }
+        );
+      } else {
+        pumpUser = memFindUserByEmail(email);
+      }
+      const token = generateToken(pumpUser);
+      return res.status(200).json({
+        success: true,
+        token,
+        user: { id: pumpUser._id, email: pumpUser.email, fullName: pumpUser.fullName, role: pumpUser.role }
+      });
+    }
+
     if (!isDbConnected) {
       const user = memFindUserByEmail(email);
       if (!user) {
