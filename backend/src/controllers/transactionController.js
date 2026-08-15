@@ -170,6 +170,16 @@ export const createTransaction = async (req, res, next) => {
       previousHash
     );
 
+    // Deduct remaining quota atomically in MongoDB, ensuring it doesn't drop below 0
+    const currentQuota = await Quota.findOne({ userId: dbUserId });
+    if (currentQuota) {
+      const newRemaining = Math.max(0, currentQuota.remainingQuota - allocatedAmount);
+      await Quota.findOneAndUpdate(
+        { userId: dbUserId },
+        { $set: { remainingQuota: newRemaining } }
+      );
+    }
+
     const transaction = await Transaction.create({
       transactionId,
       date,

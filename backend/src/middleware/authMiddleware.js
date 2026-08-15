@@ -1,3 +1,4 @@
+import mongoose from 'mongoose';
 import jwt from 'jsonwebtoken';
 import User from '../models/User.js';
 import { isDbConnected, memFindUserById } from '../services/memoryDb.js';
@@ -18,7 +19,14 @@ export const protect = async (req, res, next) => {
         return next();
       }
 
-      req.user = await User.findById(decoded.id).select('-passwordHash');
+      if (mongoose.Types.ObjectId.isValid(decoded.id)) {
+        req.user = await User.findById(decoded.id).select('-passwordHash');
+      }
+      
+      if (!req.user) {
+        req.user = memFindUserById(decoded.id);
+      }
+
       if (!req.user) {
         return res.status(401).json({ success: false, message: 'Not authorized, user profile not found' });
       }

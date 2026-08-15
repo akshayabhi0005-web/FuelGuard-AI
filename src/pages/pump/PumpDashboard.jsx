@@ -1,9 +1,11 @@
-import React, { useContext, useState } from 'react';
+import React, { useContext, useState, useRef, useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { AppContext } from '../../context/AppContext';
+import { Html5Qrcode } from 'html5-qrcode';
 import { 
   Fuel, QrCode, ClipboardCheck, History, 
-  Settings, UserCheck, Play, ArrowRight, Gauge, Users, Layers, ShieldAlert
+  Play, Gauge, Users, Layers, ShieldAlert,
+  Camera, X, CheckCircle, AlertTriangle
 } from 'lucide-react';
 import { ResponsiveContainer, AreaChart, Area, XAxis, YAxis, Tooltip, CartesianGrid } from 'recharts';
 
@@ -15,10 +17,9 @@ const PumpDashboard = () => {
     addFraudLogEntry,
     stations,
     getUserQuota,
-    sendVerificationOtp,
-    verifyOtpCode,
     adminUser,
-    usedQrCodes
+    usedQrCodes,
+    BACKEND_URL
   } = useContext(AppContext);
   
   const navigate = useNavigate();
@@ -29,10 +30,33 @@ const PumpDashboard = () => {
   const [qrInput, setQrInput] = useState('');
   const [scannedCitizen, setScannedCitizen] = useState(null);
   const [fillAmount, setFillAmount] = useState('10');
-  const [otpSent, setOtpSent] = useState(false);
-  const [otpCode, setOtpCode] = useState('');
   const [fillError, setFillError] = useState('');
   const [fillSuccess, setFillSuccess] = useState('');
+  
+  // New QR scanner states
+  const [scannerActive, setScannerActive] = useState(false);
+  const [isVerifying, setIsVerifying] = useState(false);
+  const [verificationResult, setVerificationResult] = useState(null);
+  const [showManualInput, setShowManualInput] = useState(false);
+  const [showConfirmDispense, setShowConfirmDispense] = useState(false);
+  const [dispenseReceipt, setDispenseReceipt] = useState(null);
+  
+  const qrScannerRef = useRef(null);
+
+  useEffect(() => {
+    return () => {
+      // Cleanup scanner on unmount
+      if (qrScannerRef.current) {
+        try {
+          if (qrScannerRef.current.isScanning) {
+            qrScannerRef.current.stop();
+          }
+        } catch (err) {
+          console.error("Scanner cleanup error:", err);
+        }
+      }
+    };
+  }, []);
 
   const currentStation = stations.find(s => s.name === (pumpUser?.station || 'Ceypetco - Town Hall')) || stations[0];
 
@@ -99,15 +123,22 @@ const PumpDashboard = () => {
     );
   }
 
-  // Handle QR Scan lookup
-  const handleScanLookup = async (e) => {
-    e.preventDefault();
+  // Refactored Verification Logic
+  const verifyToken = async (token) => {
     setFillError('');
     setFillSuccess('');
-    setOtpSent(false);
-    setActiveDemoOtp('');
+    setVerificationResult(null);
+    setDispenseReceipt(null);
 
-    if (!qrInput.trim()) return;
+    const cleanToken = token.trim();
+    if (!cleanToken) return;
+
+    if (!BACKEND_URL) {
+      setFillError('🚨 SERVER OFFLINE: Backend URL is not configured. Verification service unavailable.');
+      return;
+    }
+
+    setIsVerifying(true);
 
     try {
       const res = await fetch(BACKEND_URL + '/api/transactions/verify', {
@@ -117,43 +148,70 @@ const PumpDashboard = () => {
           'Authorization': `Bearer ${localStorage.getItem('auth_token') || ''}`
         },
         body: JSON.stringify({
-          token: qrInput,
+          token: cleanToken,
           stationName: pumpUser?.station || 'Ceypetco - Town Hall'
         })
       });
+
+      const contentType = res.headers.get('content-type');
+      if (!contentType || !contentType.includes('application/json')) {
+        throw new Error('Received non-JSON response from server.');
+      }
 
       const data = await res.json();
       
       if (!res.ok) {
         setFillError(`🚨 SECURITY INCIDENT: ${data.reason || data.message || 'Verification failed.'}`);
         setScannedCitizen(null);
+        setVerificationResult(null);
         return;
       }
 
-      // Verification succeeded!
-      const matched = fuelUsers.find(u => u.email.toLowerCase() === data.userId.toLowerCase() || u.email === data.userId || u.vehicleNumber === data.vehicleNumber);
-      if (matched) {
-        setScannedCitizen(matched);
-      } else {
-        setScannedCitizen({
-          email: data.userId,
-          vehicleNumber: data.vehicleNumber,
-          fullName: 'Registered Citizen',
-          vehicleType: 'Car',
-          district: 'Colombo',
-          state: 'Western',
-          phone: '9876543210'
+      // Fetch the latest remaining quota for this citizen
+      let remainingQuota = 50;
+      try {
+        const qRes = await fetch(`${BACKEND_URL}/api/quotas/user/${data.userId}`, {
+          headers: { 'Authorization': `Bearer ${localStorage.getItem('auth_token') || ''}` }
         });
+        if (qRes.ok) {
+          const qData = await qRes.json();
+          remainingQuota = qData.quota?.remainingQuota !== undefined ? qData.quota.remainingQuota : 50;
+        }
+      } catch {
+        remainingQuota = getUserQuota(data.userId);
       }
+
+      const matched = fuelUsers.find(u => u.email.toLowerCase() === data.userId.toLowerCase() || u.email === data.userId || u.vehicleNumber === data.vehicleNumber);
+      const citizenInfo = matched || {
+        email: data.userId,
+        vehicleNumber: data.vehicleNumber,
+        fullName: 'Registered Citizen',
+        vehicleType: 'Car',
+        district: 'Colombo',
+        state: 'Western',
+        phone: '94771234567'
+      };
+
+      setScannedCitizen(citizenInfo);
+      setVerificationResult({
+        verified: true,
+        vehicleNumber: data.vehicleNumber,
+        stationName: pumpUser?.station || 'Ceypetco - Town Hall',
+        remainingQuota: remainingQuota,
+        timestamp: new Date().toLocaleTimeString(),
+        token: cleanToken
+      });
+      setFillAmount(Math.min(10, remainingQuota).toString());
     } catch (err) {
       console.warn('Backend verification offline, falling back to local simulation', err.message);
-      const parts = qrInput.split('-');
-      const licensePlate = parts[2] ? `${parts[1]}-${parts[2]}-${parts[3]}` : qrInput;
+      
+      const parts = cleanToken.split('-');
+      const licensePlate = parts[2] ? `${parts[1]}-${parts[2]}-${parts[3]}` : cleanToken;
       const matched = fuelUsers.find(u => u.vehicleNumber.toLowerCase() === licensePlate.toLowerCase());
       
       if (matched) {
         setScannedCitizen(matched);
-        if (qrInput.includes('DUPLICATE') || usedQrCodes.includes(qrInput)) {
+        if (cleanToken.includes('DUPLICATE') || usedQrCodes.includes(cleanToken)) {
           addFraudLogEntry(
             'Duplicate QR Attempt', 
             `Plate ${matched.vehicleNumber} attempted scan twice at ${pumpUser?.station || 'Ceypetco - Town Hall'}.`, 
@@ -161,65 +219,161 @@ const PumpDashboard = () => {
           );
           setFillError('🚨 SECURITY SYSTEM HALTED: Duplicate QR code signature detected! Logging security incident.');
           setScannedCitizen(null);
+          setVerificationResult(null);
           return;
         }
+
+        const remainingQuota = getUserQuota(matched.email);
+        setVerificationResult({
+          verified: true,
+          vehicleNumber: matched.vehicleNumber,
+          stationName: pumpUser?.station || 'Ceypetco - Town Hall',
+          remainingQuota: remainingQuota,
+          timestamp: new Date().toLocaleTimeString(),
+          token: cleanToken
+        });
+        setFillAmount(Math.min(10, remainingQuota).toString());
       } else {
         addFraudLogEntry(
           'Fake Vehicle Signature',
-          `Unregistered vehicle code "${qrInput}" attempted authentication at Ceypetco - Town Hall.`,
+          `Unregistered vehicle code "${cleanToken}" attempted authentication at Ceypetco - Town Hall.`,
           78
         );
         setFillError('❌ UNKNOWN CODE: License plate signature mismatch. Access Denied.');
         setScannedCitizen(null);
+        setVerificationResult(null);
       }
+    } finally {
+      setIsVerifying(false);
     }
   };
 
-  const [activeDemoOtp, setActiveDemoOtp] = useState('');
-
-  const handleSendOtp = () => {
-    const code = sendVerificationOtp(scannedCitizen.email);
-    setActiveDemoOtp(code);
-    setOtpSent(true);
-  };
-
-  // Process filling transaction
-  const handleDispense = (e) => {
-    e.preventDefault();
+  const startScanner = async () => {
+    setScannerActive(true);
     setFillError('');
     setFillSuccess('');
+    setVerificationResult(null);
+    setDispenseReceipt(null);
     
-    const verification = verifyOtpCode(scannedCitizen.email, otpCode);
-    if (!verification.success) {
-      setFillError(verification.message);
+    // Tiny delay to let browser mount the div target element
+    setTimeout(async () => {
+      try {
+        const scanner = new Html5Qrcode("qr-reader");
+        qrScannerRef.current = scanner;
+        
+        await scanner.start(
+          { facingMode: "environment" },
+          {
+            fps: 10,
+            qrbox: { width: 250, height: 250 }
+          },
+          async (decodedText) => {
+            // Stop camera instantly
+            await stopScanner();
+            // Verify token
+            await verifyToken(decodedText);
+          },
+          () => {
+            // Silent reading frame errors
+          }
+        );
+      } catch (err) {
+        console.error("Camera access failed:", err);
+        setScannerActive(false);
+        setFillError("❌ Camera Access Denied: Please enable camera permissions in your browser to scan QR codes.");
+      }
+    }, 150);
+  };
+
+  const stopScanner = async () => {
+    if (qrScannerRef.current) {
+      try {
+        if (qrScannerRef.current.isScanning) {
+          await qrScannerRef.current.stop();
+        }
+      } catch (err) {
+        console.error("Error stopping scanner stream:", err);
+      }
+      qrScannerRef.current = null;
+    }
+    setScannerActive(false);
+  };
+
+  const handleScanLookup = async (e) => {
+    e.preventDefault();
+    if (!qrInput.trim()) return;
+    await verifyToken(qrInput);
+  };
+
+  const triggerDispense = async () => {
+    setFillError('');
+    setFillSuccess('');
+    setShowConfirmDispense(false);
+
+    if (!verificationResult || !scannedCitizen) return;
+
+    const liters = parseFloat(fillAmount);
+    if (isNaN(liters) || liters <= 0) {
+      setFillError('❌ INVALID QUANTITY: Enter a valid quantity greater than 0.');
       return;
     }
 
-    const liters = parseFloat(fillAmount);
-    const res = addFuelTransaction(liters, pumpUser?.station || 'Ceypetco - Town Hall', scannedCitizen.vehicleNumber, qrInput);
-    
-    if (res.success) {
-      // Update operator stats
-      setDailySales(prev => ({
-        litersFilled: prev.litersFilled + liters,
-        revenue: prev.revenue + (liters * 370),
-        vehiclesServed: prev.vehiclesServed + 1
-      }));
-
-      setFillSuccess(`Dispensed ${liters} L to vehicle ${scannedCitizen.vehicleNumber} successfully!`);
-      
-      // Clear fields
-      setTimeout(() => {
-        setScannedCitizen(null);
-        setQrInput('');
-        setOtpSent(false);
-        setOtpCode('');
-        setActiveDemoOtp('');
-        setFillSuccess('');
-      }, 2500);
-    } else {
-      setFillError(res.message);
+    if (liters > verificationResult.remainingQuota) {
+      setFillError(`❌ QUOTA EXCEEDED: Cannot dispense more than remaining ${verificationResult.remainingQuota} Liters.`);
+      return;
     }
+
+    setIsVerifying(true);
+
+    try {
+      const res = await addFuelTransaction(
+        liters, 
+        pumpUser?.station || 'Ceypetco - Town Hall', 
+        scannedCitizen.vehicleNumber, 
+        verificationResult.token
+      );
+      
+      if (res.success) {
+        const txId = Date.now().toString(); // Consistent with AppContext newTx.id
+        setDispenseReceipt({
+          transactionId: txId,
+          vehiclePlate: scannedCitizen.vehicleNumber,
+          dispensedLiters: liters,
+          cost: liters * 370,
+          timestamp: new Date().toLocaleTimeString()
+        });
+
+        // Update local dashboard states
+        setDailySales(prev => ({
+          litersFilled: prev.litersFilled + liters,
+          revenue: prev.revenue + (liters * 370),
+          vehiclesServed: prev.vehiclesServed + 1
+        }));
+
+        setFillSuccess(`⛽ SUCCESS: Dispensed ${liters} L to vehicle ${scannedCitizen.vehicleNumber} successfully!`);
+        
+        // Clear active session after a few seconds
+        setTimeout(() => {
+          handleClearScan();
+        }, 4000);
+      } else {
+        setFillError(`❌ DISPENSING FAILED: ${res.message}`);
+      }
+    } catch (err) {
+      console.error(err);
+      setFillError('❌ Network/server connection failed. Could not process transaction.');
+    } finally {
+      setIsVerifying(false);
+    }
+  };
+
+  const handleClearScan = () => {
+    setScannedCitizen(null);
+    setVerificationResult(null);
+    setDispenseReceipt(null);
+    setQrInput('');
+    setFillError('');
+    setFillSuccess('');
   };
 
   return (
@@ -254,90 +408,325 @@ const PumpDashboard = () => {
               </div>
             )}
 
-            <form onSubmit={handleScanLookup} style={{ display: 'flex', gap: '0.5rem', marginBottom: '1.5rem' }}>
-              <input 
-                type="text" 
-                className="form-input" 
-                placeholder="Enter Token (e.g. WP-CAD-8930 or WP-CAD-8930-DUPLICATE)"
-                value={qrInput}
-                onChange={(e) => setQrInput(e.target.value)}
-              />
-              <button type="submit" className="btn btn-primary" style={{ background: 'linear-gradient(135deg, #2563eb 0%, #06b6d4 100%)' }}>
-                Authenticate
-              </button>
-            </form>
+            {/* Initial Scan Action UI (if no result and not scanning) */}
+            {!verificationResult && !scannerActive && !dispenseReceipt && (
+              <div style={{ textAlign: 'center', padding: '1.5rem 0' }}>
+                <button 
+                  onClick={startScanner} 
+                  className="btn btn-primary" 
+                  style={{ 
+                    background: 'linear-gradient(135deg, #0284c7 0%, #06b6d4 100%)', 
+                    fontSize: '1rem', 
+                    padding: '12px 24px', 
+                    display: 'inline-flex', 
+                    alignItems: 'center', 
+                    justifyContent: 'center',
+                    gap: '8px', 
+                    boxShadow: '0 4px 15px rgba(6, 182, 212, 0.3)',
+                    marginBottom: '1rem',
+                    width: '100%'
+                  }}
+                >
+                  <Camera size={18} /> Scan Customer Quota QR
+                </button>
 
-            {/* Display scanned citizen information */}
-            {scannedCitizen && (
-              <div style={{ background: 'rgba(255,255,255,0.02)', padding: '1.5rem', borderRadius: '12px', border: '1px solid rgba(255,255,255,0.05)' }}>
-                <h4 style={{ fontSize: '1rem', fontWeight: 600, borderBottom: '1px solid var(--glass-border)', paddingBottom: '0.5rem', marginBottom: '1rem', color: '#ffffff' }}>
-                  Customer Details Lookup
-                </h4>
-                
-                <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '1rem', marginBottom: '1.5rem' }}>
-                  <div>
-                    <span style={{ fontSize: '0.7rem', color: 'var(--text-secondary)', display: 'block' }}>Citizen Name</span>
-                    <strong style={{ fontSize: '0.9rem' }}>{scannedCitizen.fullName}</strong>
-                  </div>
-                  <div>
-                    <span style={{ fontSize: '0.7rem', color: 'var(--text-secondary)', display: 'block' }}>Vehicle Plate</span>
-                    <strong style={{ fontSize: '0.9rem', textTransform: 'uppercase' }}>{scannedCitizen.vehicleNumber}</strong>
-                  </div>
-                  <div>
-                    <span style={{ fontSize: '0.7rem', color: 'var(--text-secondary)', display: 'block' }}>Vehicle Type</span>
-                    <strong style={{ fontSize: '0.9rem' }}>{scannedCitizen.vehicleType}</strong>
-                  </div>
-                  <div>
-                    <span style={{ fontSize: '0.7rem', color: 'var(--text-secondary)', display: 'block' }}>Remaining Quota</span>
-                    <strong style={{ fontSize: '0.9rem', color: '#06b6d4' }}>
-                      {getUserQuota(scannedCitizen.email)} L
-                    </strong>
-                  </div>
+                <div style={{ margin: '1rem 0', textAlign: 'center' }}>
+                  <button 
+                    onClick={() => setShowManualInput(!showManualInput)} 
+                    style={{ background: 'none', border: 'none', color: '#06b6d4', cursor: 'pointer', fontSize: '0.85rem', fontWeight: 500 }}
+                  >
+                    {showManualInput ? 'Hide Manual Entry' : 'Or Enter Token Manually'}
+                  </button>
                 </div>
 
-                {/* Verification & Dispensing */}
-                {!otpSent ? (
-                  <button onClick={handleSendOtp} className="btn btn-primary" style={{ width: '100%' }}>
-                    Transmit verification OTP SMS
-                  </button>
-                ) : (
-                  <form onSubmit={handleDispense} style={{ display: 'flex', flexDirection: 'column', gap: '1rem' }}>
-                    <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '0.5rem' }}>
-                      <div>
-                        <label className="form-label">Liters to Dispense</label>
-                        <input 
-                          type="number" 
-                          className="form-input" 
-                          value={fillAmount}
-                          onChange={(e) => setFillAmount(e.target.value)}
-                          max={getUserQuota(scannedCitizen.email)}
-                          min="1"
-                        />
-                      </div>
-                      <div>
-                        <label className="form-label">Verification OTP</label>
-                        <input 
-                          type="text" 
-                          className="form-input" 
-                          value={otpCode}
-                          onChange={(e) => setOtpCode(e.target.value)}
-                          placeholder="Enter 6-digit code"
-                        />
-                      </div>
-                    </div>
-                    {activeDemoOtp && (
-                      <div style={{ background: 'rgba(245, 158, 11, 0.1)', color: '#f59e0b', padding: '0.6rem 0.85rem', borderRadius: '8px', fontSize: '0.75rem', border: '1px solid rgba(245, 158, 11, 0.2)', textAlign: 'left', marginTop: '0.75rem' }}>
-                        🔑 <strong>DEMO OTP — SMS gateway not connected:</strong> <code style={{ fontSize: '0.9rem', color: '#ffffff', fontWeight: 'bold' }}>{activeDemoOtp}</code> (expires in 60s)
-                      </div>
-                    )}
-                    <button type="submit" className="btn btn-primary" style={{ background: '#10b981' }}>
-                      Dispense Fuel <Play size={14} />
+                {showManualInput && (
+                  <form onSubmit={handleScanLookup} style={{ display: 'flex', gap: '0.5rem', marginTop: '1rem' }}>
+                    <input 
+                      type="text" 
+                      className="form-input" 
+                      placeholder="Enter Token (e.g. FUEL-WP-CAD-8930-...)"
+                      value={qrInput}
+                      onChange={(e) => setQrInput(e.target.value)}
+                    />
+                    <button type="submit" className="btn btn-primary" style={{ background: 'rgba(255,255,255,0.05)', color: '#ffffff', border: '1px solid rgba(255,255,255,0.1)' }}>
+                      Verify
                     </button>
                   </form>
                 )}
               </div>
             )}
+
+            {/* Verification Loading State */}
+            {isVerifying && (
+              <div style={{ textAlign: 'center', padding: '2rem 0' }}>
+                <div style={{ 
+                  width: '32px', 
+                  height: '32px', 
+                  border: '3px solid rgba(255,255,255,0.05)', 
+                  borderTopColor: '#06b6d4', 
+                  borderRadius: '50%',
+                  display: 'inline-block',
+                  animation: 'spin 1s linear infinite',
+                  marginBottom: '1rem'
+                }}></div>
+                <p style={{ color: 'var(--text-secondary)', fontSize: '0.85rem' }}>Verifying quota token with blockchain ledger...</p>
+              </div>
+            )}
+
+            {/* Display verification card & Dispensing controls */}
+            {verificationResult && scannedCitizen && !dispenseReceipt && (
+              <div style={{ background: 'rgba(255,255,255,0.02)', padding: '1.5rem', borderRadius: '12px', border: '1px solid rgba(255,255,255,0.05)' }}>
+                <div style={{ display: 'flex', alignItems: 'center', gap: '8px', borderBottom: '1px solid var(--glass-border)', paddingBottom: '0.75rem', marginBottom: '1.25rem' }}>
+                  <CheckCircle size={24} style={{ color: '#10b981' }} />
+                  <div>
+                    <h4 style={{ fontSize: '1rem', fontWeight: 700, margin: 0, color: '#ffffff' }}>Quota Verified Successfully</h4>
+                    <span style={{ fontSize: '0.7rem', color: 'var(--text-secondary)' }}>Verified at {verificationResult.timestamp}</span>
+                  </div>
+                </div>
+                
+                <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '1.25rem', marginBottom: '1.5rem' }}>
+                  <div>
+                    <span style={{ fontSize: '0.7rem', color: 'var(--text-secondary)', display: 'block', marginBottom: '2px' }}>Citizen Name</span>
+                    <strong style={{ fontSize: '0.9rem', color: '#f1f5f9' }}>{scannedCitizen.fullName}</strong>
+                  </div>
+                  <div>
+                    <span style={{ fontSize: '0.7rem', color: 'var(--text-secondary)', display: 'block', marginBottom: '2px' }}>Vehicle Plate</span>
+                    <strong style={{ fontSize: '0.9rem', textTransform: 'uppercase', color: '#f1f5f9' }}>{scannedCitizen.vehicleNumber}</strong>
+                  </div>
+                  <div>
+                    <span style={{ fontSize: '0.7rem', color: 'var(--text-secondary)', display: 'block', marginBottom: '2px' }}>Vehicle Type</span>
+                    <strong style={{ fontSize: '0.9rem', color: '#f1f5f9' }}>{scannedCitizen.vehicleType}</strong>
+                  </div>
+                  <div>
+                    <span style={{ fontSize: '0.7rem', color: 'var(--text-secondary)', display: 'block', marginBottom: '2px' }}>Station Terminal</span>
+                    <strong style={{ fontSize: '0.9rem', color: '#f1f5f9' }}>{verificationResult.stationName}</strong>
+                  </div>
+                  <div style={{ gridColumn: 'span 2' }}>
+                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', background: 'rgba(6, 182, 212, 0.05)', padding: '0.75rem 1rem', borderRadius: '8px', border: '1px solid rgba(6, 182, 212, 0.15)' }}>
+                      <span style={{ fontSize: '0.75rem', color: '#06b6d4', fontWeight: 600 }}>Available Quota</span>
+                      <strong style={{ fontSize: '1.1rem', color: '#06b6d4' }}>{verificationResult.remainingQuota} Liters</strong>
+                    </div>
+                  </div>
+                </div>
+
+                {/* Dispensing Action Form */}
+                <div style={{ display: 'flex', flexDirection: 'column', gap: '1rem' }}>
+                  <div>
+                    <label className="form-label" style={{ fontSize: '0.75rem', marginBottom: '6px', display: 'block' }}>Liters to Dispense</label>
+                    <input 
+                      type="number" 
+                      className="form-input" 
+                      value={fillAmount}
+                      onChange={(e) => setFillAmount(e.target.value)}
+                      max={verificationResult.remainingQuota}
+                      min="1"
+                      step="0.5"
+                    />
+                  </div>
+                  
+                  <div style={{ display: 'grid', gridTemplateColumns: '1.2fr 1fr', gap: '0.5rem', marginTop: '0.5rem' }}>
+                    <button 
+                      onClick={() => setShowConfirmDispense(true)} 
+                      className="btn btn-primary" 
+                      style={{ background: '#10b981', display: 'inline-flex', alignItems: 'center', justifyContent: 'center', gap: '4px' }}
+                      disabled={isVerifying || parseFloat(fillAmount) <= 0 || parseFloat(fillAmount) > verificationResult.remainingQuota}
+                    >
+                      Dispense Fuel <Play size={14} />
+                    </button>
+                    <button 
+                      onClick={handleClearScan} 
+                      className="btn btn-secondary"
+                    >
+                      Cancel / Clear
+                    </button>
+                  </div>
+                </div>
+              </div>
+            )}
+
+            {/* Display Dispense Receipt Success Card */}
+            {dispenseReceipt && (
+              <div style={{ background: 'rgba(16, 185, 129, 0.05)', padding: '1.5rem', borderRadius: '12px', border: '1px solid rgba(16, 185, 129, 0.2)', textAlign: 'left' }}>
+                <div style={{ display: 'flex', alignItems: 'center', gap: '8px', borderBottom: '1px solid rgba(16, 185, 129, 0.2)', paddingBottom: '0.75rem', marginBottom: '1.25rem' }}>
+                  <CheckCircle size={24} style={{ color: '#10b981' }} />
+                  <div>
+                    <h4 style={{ fontSize: '1rem', fontWeight: 700, margin: 0, color: '#34d399' }}>Transaction Complete</h4>
+                    <span style={{ fontSize: '0.7rem', color: 'var(--text-secondary)' }}>Receipt Generated at {dispenseReceipt.timestamp}</span>
+                  </div>
+                </div>
+                
+                <div style={{ display: 'flex', flexDirection: 'column', gap: '0.75rem', fontSize: '0.85rem', marginBottom: '1.5rem' }}>
+                  <div style={{ display: 'flex', justifyContent: 'space-between' }}>
+                    <span style={{ color: 'var(--text-secondary)' }}>Receipt ID:</span>
+                    <strong style={{ color: '#f1f5f9' }}>TX-{dispenseReceipt.transactionId}</strong>
+                  </div>
+                  <div style={{ display: 'flex', justifyContent: 'space-between' }}>
+                    <span style={{ color: 'var(--text-secondary)' }}>Vehicle Number:</span>
+                    <strong style={{ color: '#f1f5f9', textTransform: 'uppercase' }}>{dispenseReceipt.vehiclePlate}</strong>
+                  </div>
+                  <div style={{ display: 'flex', justifyContent: 'space-between' }}>
+                    <span style={{ color: 'var(--text-secondary)' }}>Fuel Dispensed:</span>
+                    <strong style={{ color: '#34d399' }}>{dispenseReceipt.dispensedLiters} Liters</strong>
+                  </div>
+                  <div style={{ display: 'flex', justifyContent: 'space-between' }}>
+                    <span style={{ color: 'var(--text-secondary)' }}>Total Cost:</span>
+                    <strong style={{ color: '#f1f5f9' }}>Rs. {dispenseReceipt.cost.toLocaleString()}</strong>
+                  </div>
+                </div>
+
+                <button 
+                  onClick={handleClearScan} 
+                  className="btn btn-primary"
+                  style={{ width: '100%', background: 'linear-gradient(135deg, #0284c7 0%, #06b6d4 100%)' }}
+                >
+                  Clear & Ready Next Scan
+                </button>
+              </div>
+            )}
           </div>
+
+          {/* QR Scanner Camera Overlay Modal */}
+          {scannerActive && (
+            <div style={{
+              position: 'fixed',
+              top: 0,
+              left: 0,
+              width: '100vw',
+              height: '100vh',
+              background: 'rgba(15, 23, 42, 0.85)',
+              backdropFilter: 'blur(8px)',
+              display: 'flex',
+              justifyContent: 'center',
+              alignItems: 'center',
+              zIndex: 9999,
+              padding: '1rem'
+            }}>
+              <div className="glass-panel" style={{
+                width: '100%',
+                maxWidth: '450px',
+                padding: '2rem',
+                borderRadius: '16px',
+                border: '1px solid rgba(255, 255, 255, 0.1)',
+                textAlign: 'center',
+                boxShadow: '0 20px 25px -5px rgba(0, 0, 0, 0.5)'
+              }}>
+                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '1.5rem' }}>
+                  <h3 style={{ fontSize: '1.25rem', fontWeight: 700, margin: 0, display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
+                    <Camera size={20} style={{ color: '#06b6d4' }} /> Quota QR Scanner
+                  </h3>
+                  <button 
+                    onClick={stopScanner} 
+                    style={{ background: 'none', border: 'none', color: '#94a3b8', cursor: 'pointer' }}
+                  >
+                    <X size={20} />
+                  </button>
+                </div>
+
+                <div style={{ position: 'relative', marginBottom: '1.5rem', borderRadius: '12px', overflow: 'hidden', background: '#000000', border: '2px solid rgba(6, 182, 212, 0.3)' }}>
+                  {/* Scanning Target frame */}
+                  <div style={{
+                    position: 'absolute',
+                    top: '50%',
+                    left: '50%',
+                    transform: 'translate(-50%, -50%)',
+                    width: '180px',
+                    height: '180px',
+                    border: '3px solid #06b6d4',
+                    borderRadius: '12px',
+                    zIndex: 10,
+                    pointerEvents: 'none',
+                    boxShadow: '0 0 0 9999px rgba(0,0,0,0.5)'
+                  }}>
+                    {/* Laser animation */}
+                    <div style={{
+                      width: '100%',
+                      height: '2px',
+                      background: '#06b6d4',
+                      position: 'absolute',
+                      top: 0,
+                      boxShadow: '0 0 8px #06b6d4',
+                      animation: 'scanLaser 2s linear infinite'
+                    }} />
+                  </div>
+                  <div id="qr-reader" style={{ width: '100%' }}></div>
+                </div>
+
+                <p style={{ color: 'var(--text-secondary)', fontSize: '0.85rem', marginBottom: '1.5rem' }}>
+                  Point your camera at the customer's quota QR code signature.
+                </p>
+
+                <button onClick={stopScanner} className="btn btn-secondary" style={{ width: '100%' }}>
+                  Cancel Scan
+                </button>
+              </div>
+            </div>
+          )}
+
+          {/* Dispensing Confirmation Modal */}
+          {showConfirmDispense && (
+            <div style={{
+              position: 'fixed',
+              top: 0,
+              left: 0,
+              width: '100vw',
+              height: '100vh',
+              background: 'rgba(15, 23, 42, 0.85)',
+              backdropFilter: 'blur(8px)',
+              display: 'flex',
+              justifyContent: 'center',
+              alignItems: 'center',
+              zIndex: 9999,
+              padding: '1rem'
+            }}>
+              <div className="glass-panel" style={{
+                width: '100%',
+                maxWidth: '400px',
+                padding: '2rem',
+                borderRadius: '16px',
+                border: '1px solid rgba(255, 255, 255, 0.1)',
+                textAlign: 'center'
+              }}>
+                <AlertTriangle size={48} style={{ color: '#eab308', marginBottom: '1.5rem' }} />
+                <h3 style={{ fontSize: '1.25rem', fontWeight: 700, marginBottom: '1rem', color: '#ffffff' }}>
+                  Confirm Dispensing
+                </h3>
+                <p style={{ color: 'var(--text-secondary)', fontSize: '0.9rem', marginBottom: '1.5rem' }}>
+                  Are you sure you want to dispense <strong>{fillAmount} Liters</strong> of Petrol to vehicle <strong>{scannedCitizen?.vehicleNumber?.toUpperCase()}</strong>?
+                </p>
+                
+                <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '1rem' }}>
+                  <button 
+                    onClick={() => setShowConfirmDispense(false)} 
+                    className="btn btn-secondary"
+                    disabled={isVerifying}
+                  >
+                    Cancel
+                  </button>
+                  <button 
+                    onClick={triggerDispense} 
+                    className="btn btn-primary"
+                    style={{ background: '#10b981' }}
+                    disabled={isVerifying}
+                  >
+                    {isVerifying ? 'Processing...' : 'Confirm'}
+                  </button>
+                </div>
+              </div>
+            </div>
+          )}
+
+          {/* Inject Dynamic Keyframe Animations */}
+          <style>{`
+            @keyframes scanLaser {
+              0% { top: 0%; }
+              50% { top: 100%; }
+              100% { top: 0%; }
+            }
+            @keyframes spin {
+              0% { transform: rotate(0deg); }
+              100% { transform: rotate(360deg); }
+            }
+          `}</style>
 
           {/* Daily Sales transaction history */}
           <div className="glass-panel" style={{ padding: '2rem', textAlign: 'left' }}>
