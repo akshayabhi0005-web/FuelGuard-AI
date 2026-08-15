@@ -37,7 +37,8 @@ export const memoryDb = {
   forecasts: [],
   lpgBookings: [],
   fuelInventory: [],
-  lpgInventory: []
+  lpgInventory: [],
+  secureTokens: []
 };
 
 // Seed initial demo data
@@ -341,4 +342,31 @@ export const memVerifyLpgBookingOtp = (id, otpCode) => {
     return { success: true, booking };
   }
   return { success: false };
+};
+
+export const memCreateSecureToken = (tokenHash, userId, vehicleNumber, expiresAt) => {
+  const token = {
+    tokenHash,
+    userId,
+    vehicleNumber,
+    expiresAt,
+    used: false
+  };
+  memoryDb.secureTokens.push(token);
+  return token;
+};
+
+export const memFindSecureTokenByHash = (tokenHash) => {
+  const now = new Date();
+  // Lazy prune expired tokens
+  memoryDb.secureTokens = memoryDb.secureTokens.filter(t => t.expiresAt > now);
+  return memoryDb.secureTokens.find(t => t.tokenHash === tokenHash);
+};
+
+export const memMarkSecureTokenAsUsed = (tokenHash) => {
+  const token = memFindSecureTokenByHash(tokenHash);
+  if (token) {
+    token.used = true;
+  }
+  return token;
 };

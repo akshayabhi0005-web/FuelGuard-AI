@@ -50,6 +50,34 @@ const FuelDashboard = () => {
   const [fillStation, setFillStation] = useState('Ceypetco - Town Hall');
   const [fillSuccess, setFillSuccess] = useState(false);
   const [fillError, setFillError] = useState('');
+  const [timeLeft, setTimeLeft] = useState(300);
+
+  useEffect(() => {
+    let timer = null;
+    if (qrModalOpen) {
+      setTimeLeft(300);
+      timer = setInterval(() => {
+        setTimeLeft(prev => {
+          if (prev <= 1) {
+            clearInterval(timer);
+            setQrModalOpen(false);
+            alert('Your secure fuel quota token has expired. Please generate a new one.');
+            return 0;
+          }
+          return prev - 1;
+        });
+      }, 1000);
+    }
+    return () => {
+      if (timer) clearInterval(timer);
+    };
+  }, [qrModalOpen]);
+
+  const formatTime = (seconds) => {
+    const mins = Math.floor(seconds / 60);
+    const secs = seconds % 60;
+    return `${mins.toString().padStart(2, '0')}:${secs.toString().padStart(2, '0')}`;
+  };
 
   // Notifications State (Mock)
   const [notifications, setNotifications] = useState([
@@ -81,9 +109,15 @@ const FuelDashboard = () => {
       setQrValue(token);
       setIsGenerating(false);
       setQrModalOpen(true);
-    } catch (err) {
-      const fallbackToken = `FUEL-${displayUser.vehicleNumber}-${Date.now()}`;
-      setQrValue(fallbackToken);
+    } catch {
+      // Offline fallback: short secure token generation
+      const CHARSET = 'ABCDEFGHJKLMNPQRSTUVWXYZZ23456789';
+      let localToken = '';
+      for (let i = 0; i < 10; i++) {
+        localToken += CHARSET[Math.floor(Math.random() * CHARSET.length)];
+      }
+      const formatted = `${localToken.substring(0, 4)}-${localToken.substring(4, 8)}-${localToken.substring(8, 10)}`;
+      setQrValue(formatted);
       setIsGenerating(false);
       setQrModalOpen(true);
     }
@@ -453,58 +487,24 @@ const FuelDashboard = () => {
               ) : (
                 <>
                   <h3 style={{ fontSize: '1.25rem', fontWeight: 700, marginBottom: '0.25rem', color: '#ffffff' }}>Active Quota Code</h3>
-                  <p style={{ fontSize: '0.75rem', color: 'var(--text-secondary)', marginBottom: '1.5rem' }}>Present this secure token to the petrol pump clerk.</p>
+                  <p style={{ fontSize: '0.75rem', color: 'var(--text-secondary)', marginBottom: '1.5rem' }}>Present this secure QR code to the petrol pump operator.</p>
                   
-                  {/* Glowing QR wrapper */}
-                  <div style={{ display: 'inline-block', padding: '0.5rem', background: '#ffffff', borderRadius: '12px', border: '1px solid rgba(6, 182, 212, 0.3)', marginBottom: '1.5rem' }} className="pulse-indicator">
-                    {/* Simulated visual QR */}
-                    <div style={{ width: '150px', height: '150px', background: '#ffffff', padding: '4px', display: 'grid', gridTemplateColumns: 'repeat(6, 1fr)', gap: '4px' }}>
-                      <div style={{ background: '#0f172a' }}></div>
-                      <div style={{ background: '#0f172a' }}></div>
-                      <div></div>
-                      <div style={{ background: '#0f172a' }}></div>
-                      <div style={{ background: '#0f172a' }}></div>
-                      <div style={{ background: '#0f172a' }}></div>
-
-                      <div style={{ background: '#0f172a' }}></div>
-                      <div></div>
-                      <div></div>
-                      <div></div>
-                      <div></div>
-                      <div style={{ background: '#0f172a' }}></div>
-
-                      <div></div>
-                      <div></div>
-                      <div style={{ background: '#0f172a' }}></div>
-                      <div style={{ background: '#0f172a' }}></div>
-                      <div></div>
-                      <div></div>
-
-                      <div style={{ background: '#0f172a' }}></div>
-                      <div></div>
-                      <div style={{ background: '#0f172a' }}></div>
-                      <div></div>
-                      <div style={{ background: '#0f172a' }}></div>
-                      <div></div>
-
-                      <div style={{ background: '#0f172a' }}></div>
-                      <div></div>
-                      <div></div>
-                      <div></div>
-                      <div style={{ background: '#0f172a' }}></div>
-                      <div style={{ background: '#0f172a' }}></div>
-
-                      <div style={{ background: '#0f172a' }}></div>
-                      <div style={{ background: '#0f172a' }}></div>
-                      <div></div>
-                      <div style={{ background: '#0f172a' }}></div>
-                      <div style={{ background: '#0f172a' }}></div>
-                      <div style={{ background: '#0f172a' }}></div>
-                    </div>
+                  {/* High contrast real QR code using free secure API */}
+                  <div style={{ display: 'inline-block', padding: '0.75rem', background: '#ffffff', borderRadius: '16px', border: '2px solid #06b6d4', marginBottom: '1.5rem', boxShadow: '0 0 15px rgba(6, 182, 212, 0.25)' }}>
+                    <img 
+                      src={`https://api.qrserver.com/v1/create-qr-code/?size=200x200&data=${encodeURIComponent(qrValue)}`}
+                      alt="Quota QR Code"
+                      style={{ width: '200px', height: '200px', display: 'block' }}
+                    />
                   </div>
                   
-                  <div style={{ background: 'rgba(255,255,255,0.02)', padding: '6px 12px', borderRadius: '20px', border: '1px solid var(--glass-border)', fontSize: '0.75rem', fontFamily: 'monospace', color: '#06b6d4', display: 'inline-block', marginBottom: '1.5rem' }}>
-                    {qrValue}
+                  <div style={{ display: 'flex', flexDirection: 'column', gap: '0.5rem', marginBottom: '1.5rem' }}>
+                    <div style={{ fontSize: '0.95rem', color: 'var(--text-secondary)' }}>
+                      Token: <strong style={{ color: '#ffffff', fontFamily: 'monospace', fontSize: '1.1rem', letterSpacing: '1px' }}>{qrValue}</strong>
+                    </div>
+                    <div style={{ fontSize: '0.85rem', color: 'var(--text-secondary)' }}>
+                      Expires in: <strong style={{ color: '#ef4444' }}>{formatTime(timeLeft)}</strong>
+                    </div>
                   </div>
 
                   {/* Simulating scanning / pump terminal */}

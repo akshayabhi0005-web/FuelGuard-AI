@@ -6,10 +6,16 @@ import FuelInventory from '../models/FuelInventory.js';
 import User from '../models/User.js';
 import Vehicle from '../models/Vehicle.js';
 import FraudLog from '../models/FraudLog.js';
+import SecureToken from '../models/SecureToken.js';
+import { generateShortToken, hashToken } from '../utils/cryptoUtils.js';
 import { auditTransaction } from '../services/fraudService.js';
 import { mineBlock } from '../services/ledgerService.js';
 import { sendSimulatedSMS } from '../services/smsService.js';
-import { isDbConnected, memFindUserByEmail, memFindUserById, memGetTransactions, memCreateTransaction, memUpdateQuotaRemaining, memFindVehicleByPlate, memoryDb } from '../services/memoryDb.js';
+import { 
+  isDbConnected, memFindUserByEmail, memFindUserById, memGetTransactions, 
+  memCreateTransaction, memUpdateQuotaRemaining, memFindVehicleByPlate, memoryDb,
+  memCreateSecureToken, memFindSecureTokenByHash, memMarkSecureTokenAsUsed
+} from '../services/memoryDb.js';
 
 export const getTransactions = async (req, res, next) => {
   try {
@@ -60,6 +66,11 @@ export const createTransaction = async (req, res, next) => {
 
       // Deduct remaining quota in memory
       memUpdateQuotaRemaining(dbUserId, allocatedAmount);
+
+      // Invalidate short-lived token immediately on dispense
+      if (req.body.qrToken) {
+        memMarkSecureTokenAsUsed(hashToken(req.body.qrToken));
+      }
 
       const transaction = memCreateTransaction({
         transactionId,
@@ -180,6 +191,14 @@ export const createTransaction = async (req, res, next) => {
       );
     }
 
+    // Invalidate short-lived token immediately on dispense
+    if (req.body.qrToken) {
+      await SecureToken.findOneAndUpdate(
+        { tokenHash: hashToken(req.body.qrToken) },
+        { $set: { used: true } }
+      );
+    }
+
     const transaction = await Transaction.create({
       transactionId,
       date,
@@ -233,6 +252,58 @@ export const verifyTransactionToken = async (req, res, next) => {
       return res.status(400).json({ success: false, message: 'Token string required' });
     }
 
+    const tokenHash = hashToken(token);
+
+    // 1. Try secure token lookup first
+    if (!isDbConnected) {
+      const memSecToken = memFindSecureTokenByHash(tokenHash);
+      if (memSecToken) {
+        if (memSecToken.used) {
+          return res.status(400).json({ success: false, valid: false, reason: 'Token already used' });
+        }
+        if (new Date() > memSecToken.expiresAt) {
+          return res.status(400).json({ success: false, valid: false, reason: 'Verification token expired (exceeded 5-minute window)' });
+        }
+        
+        const quota = memGetQuotaByUserId(memSecToken.userId);
+        if (!quota || quota.remainingQuota <= 0) {
+          return res.status(400).json({ success: false, valid: false, reason: 'Insufficient quota balance' });
+        }
+
+        return res.status(200).json({
+          success: true,
+          valid: true,
+          message: 'Token validated successfully',
+          userId: memSecToken.userId,
+          vehicleNumber: memSecToken.vehicleNumber
+        });
+      }
+    } else {
+      const secureToken = await SecureToken.findOne({ tokenHash });
+      if (secureToken) {
+        if (secureToken.used) {
+          return res.status(400).json({ success: false, valid: false, reason: 'Token already used' });
+        }
+        if (new Date() > secureToken.expiresAt) {
+          return res.status(400).json({ success: false, valid: false, reason: 'Verification token expired (exceeded 5-minute window)' });
+        }
+        
+        const quota = await Quota.findOne({ userId: secureToken.userId });
+        if (!quota || quota.remainingQuota <= 0) {
+          return res.status(400).json({ success: false, valid: false, reason: 'Insufficient quota balance' });
+        }
+
+        return res.status(200).json({
+          success: true,
+          valid: true,
+          message: 'Token validated successfully',
+          userId: secureToken.userId.toString(),
+          vehicleNumber: secureToken.vehicleNumber
+        });
+      }
+    }
+
+    // 2. Old fallbacks (JWT, mock FUEL-)
     if (!isDbConnected) {
       const doubleScan = memoryDb.transactions.find(t => t.transactionId === token);
       if (doubleScan) {
@@ -398,27 +469,135 @@ export const generateQrToken = async (req, res, next) => {
       return res.status(400).json({ success: false, message: 'Vehicle number is required' });
     }
 
+    const userId = req.user ? req.user._id : 'mem-user-citizen';
+
+    // 1. Generate short cryptographically secure token
+    const token = generateShortToken();
+    const tokenHash = hashToken(token);
+    const expiresAt = new Date(Date.now() + 5 * 60 * 1000); // 5 minutes expiration
+
     if (!isDbConnected) {
-      const token = jwt.sign(
-        { userId: req.user ? req.user._id : 'mem-user-citizen', vehicleNumber },
-        process.env.JWT_SECRET || 'jwtsecret123',
-        { expiresIn: '10m' }
-      );
+      memCreateSecureToken(tokenHash, userId, vehicleNumber, expiresAt);
       return res.status(200).json({
         success: true,
         token
       });
     }
 
-    const token = jwt.sign(
-      { userId: req.user._id, vehicleNumber },
-      process.env.JWT_SECRET || 'jwtsecret123',
-      { expiresIn: '10m' } // 10 minutes validation window
-    );
+    // Save token hash to MongoDB
+    await SecureToken.create({
+      tokenHash,
+      userId,
+      vehicleNumber,
+      expiresAt
+    });
 
     res.status(200).json({
       success: true,
       token
+    });
+  } catch (err) {
+    next(err);
+  }
+};
+
+// Singular Verify Token Endpoint for Pump Operator
+export const verifyQuotaToken = async (req, res, next) => {
+  try {
+    const { token } = req.body;
+    if (!token) {
+      return res.status(400).json({ success: false, message: 'Token string required' });
+    }
+
+    const tokenHash = hashToken(token);
+    const stationName = req.user?.station || req.body.stationName || 'Ceypetco - Town Hall';
+
+    if (!isDbConnected) {
+      const memSecToken = memFindSecureTokenByHash(tokenHash);
+      if (!memSecToken) {
+        return res.status(400).json({ success: false, valid: false, reason: 'Invalid token' });
+      }
+      if (memSecToken.used) {
+        return res.status(400).json({ success: false, valid: false, reason: 'Token already used' });
+      }
+      if (new Date() > memSecToken.expiresAt) {
+        return res.status(400).json({ success: false, valid: false, reason: 'Token expired' });
+      }
+
+      const quota = memGetQuotaByUserId(memSecToken.userId);
+      if (!quota || quota.remainingQuota <= 0) {
+        return res.status(400).json({ success: false, valid: false, reason: 'Insufficient quota' });
+      }
+
+      const user = memFindUserById(memSecToken.userId) || { fullName: 'Registered Citizen' };
+      const vehicle = memFindVehicleByPlate(memSecToken.vehicleNumber) || { fuelType: 'Petrol 92 Octane' };
+
+      return res.status(200).json({
+        success: true,
+        valid: true,
+        customer: {
+          name: user.fullName,
+          vehicleNumber: memSecToken.vehicleNumber
+        },
+        fuelType: vehicle.fuelType || 'Petrol 92',
+        availableQuota: quota.remainingQuota,
+        station: stationName
+      });
+    }
+
+    // MongoDB path
+    const secureToken = await SecureToken.findOne({ tokenHash });
+    if (!secureToken) {
+      return res.status(400).json({ success: false, valid: false, reason: 'Invalid token' });
+    }
+    if (secureToken.used) {
+      return res.status(400).json({ success: false, valid: false, reason: 'Token already used' });
+    }
+    if (new Date() > secureToken.expiresAt) {
+      return res.status(400).json({ success: false, valid: false, reason: 'Token expired' });
+    }
+
+    const quota = await Quota.findOne({ userId: secureToken.userId });
+    if (!quota || quota.remainingQuota <= 0) {
+      return res.status(400).json({ success: false, valid: false, reason: 'Insufficient quota' });
+    }
+
+    const user = await User.findById(secureToken.userId);
+    const vehicle = await Vehicle.findOne({ vehicleNumber: secureToken.vehicleNumber });
+
+    // Fraud auditing
+    const anomaly = await auditTransaction(secureToken.userId, secureToken.vehicleNumber, stationName);
+    if (anomaly.isAnomaly) {
+      const log = await FraudLog.create({
+        type: anomaly.type,
+        location: stationName,
+        details: anomaly.details,
+        riskScore: anomaly.riskScore,
+        status: 'Pending'
+      });
+
+      const io = req.app.get('io');
+      if (io) {
+        io.emit('fraud_alert', log);
+      }
+
+      return res.status(400).json({
+        success: false,
+        valid: false,
+        reason: `${anomaly.type}: ${anomaly.details}`
+      });
+    }
+
+    res.status(200).json({
+      success: true,
+      valid: true,
+      customer: {
+        name: user ? user.fullName : 'Registered Citizen',
+        vehicleNumber: secureToken.vehicleNumber
+      },
+      fuelType: vehicle ? vehicle.fuelType : 'Petrol 92',
+      availableQuota: quota.remainingQuota,
+      station: stationName
     });
   } catch (err) {
     next(err);

@@ -86,6 +86,7 @@ app.use('/api/vehicles', vehicleRoutes);
 app.use('/api/fuel', fuelRoutes);
 app.use('/api/lpg', lpgRoutes);
 app.use('/api/quotas', quotaRoutes);
+app.use('/api/quota', quotaRoutes);
 app.use('/api/transactions', transactionRoutes);
 app.use('/api/admin', adminRoutes);
 
